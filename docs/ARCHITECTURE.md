@@ -39,11 +39,13 @@ the Ultimate ASI Loader (our `winmm.dll`) alongside the stock WidescreenFix:
   These hardcode addresses for the no-CD `THUG2.exe` (md5 `d464781a…`); re-derive if it changes.
   `VV.GlyphFix.asi` checks the stock bytes at both patch sites first and no-ops entirely on a
   mismatch, so a different build keeps stock prompts rather than taking stray writes.
-- **`tools/glyphfix/retag_trigger_glyphs.py`** — a build post-pass (`revert`
-  `install_trigger_glyphs`), not an `.asi`. `ButtonsXbox.fnt.xbx` is original-Xbox art, whose
-  analog triggers are lettered plain `L`/`R`; on a 360-era pad that reads as the bumpers. This
-  repaints those glyphs to `LT` / `RT` / `LT+RT` inside `Data/pre/fonts.prx`. Pixels only, so
-  glyph metrics are unchanged, and it is idempotent.
+- **`thugkit/glyphfont`** — a build step, not an `.asi`. `ButtonsXbox.fnt.xbx` is original-Xbox
+  art, whose analog triggers are lettered plain `L`/`R`; on a 360-era pad that reads as the
+  bumpers. This repaints those glyphs to `LT` / `RT` / `LT+RT` inside `Data/pre/fonts.prx`.
+  Pixels only, so glyph metrics are unchanged, and it is idempotent. It lives in the Go core
+  rather than the shell orchestrator so the **Windows** lane gets it too (Windows runs
+  `revert.exe`, never the bash front door). A font it cannot align is a warning, not a build
+  failure: you keep the stock `L`/`R` art.
 - **`share/setup/revert-setup.sh` (bash)** — GE-Proton + DXVK + winetricks + `winmm`
   override + controller across the main (+ optional online) prefix.
 
@@ -59,7 +61,7 @@ zero-dep and cross-platform while the build still reproduces the full edition.
 bash orchestrator + shippable non-game assets + docs + config. They communicate ONLY
 through the built `thugkit` binary's CLI — never a Go import from root.
 
-- **Pinned thugkit commit:** `16424da` (`build` core). `revert doctor` checks the
+- **Pinned thugkit commit:** `86856ef` (`build` core). `revert doctor` checks the
   binary exposes `build`; `revert build` rebuilds it from source if a Go toolchain is
   present. A shipped Revert carries a prebuilt binary.
 
