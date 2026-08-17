@@ -206,6 +206,24 @@ install_vv_portrait() {  # $1 = edition dir
   return 0
 }
 
+# Relabel the shoulder glyphs L/R -> LT/RT in the buttons font (Data/pre/fonts.prx).
+# ButtonsXbox is ORIGINAL Xbox art, whose analog triggers are lettered plain "L"/"R";
+# on a 360-era pad that reads as the bumpers instead. Repaints pixels only, so glyph
+# metrics are untouched, and it is idempotent (a rebuild re-applies cleanly). Needs only
+# stdlib python, hence not inside the numpy/Pillow-gated CAS pass. Never fails a build.
+install_trigger_glyphs() {  # $1 = edition dir
+  local dir="$1" s="${REVERT_ROOT}/tools/glyphfix/retag_trigger_glyphs.py"
+  local prx="$dir/Data/pre/fonts.prx"
+  [[ -f "$s" && -f "$prx" ]] || return 0
+  command -v python3 >/dev/null || { note "python3 absent — keeping stock L/R button glyphs"; return 0; }
+  if python3 "$s" "$prx" "$prx" >/dev/null; then
+    log "relabelled trigger glyphs -> LT / RT / LT+RT"
+  else
+    note "LT/RT glyph relabel failed — keeping stock L/R"
+  fi
+  return 0
+}
+
 cmd_build() {
   local fast="" lane="qol"
   while [[ $# -gt 0 ]]; do
@@ -257,6 +275,7 @@ cmd_build() {
   cas_post_pass "$edition"
   install_credits_movies "$edition"
   install_vv_portrait "$edition"
+  install_trigger_glyphs "$edition"
   log "build done. Play: revert run $lane"
 }
 

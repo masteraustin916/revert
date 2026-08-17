@@ -1,10 +1,24 @@
 // VV.GlyphFix — Violet Vandal Edition: selectable button-prompt glyphs for THUG2 PC.
 //
 // THUG2's trick-combo prompts are font glyph tokens (goal_tetris_trick_text, e.g. "\b4 + \b2").
-// The PC font renderer routes the four FACE-button glyph slots (0-3) to the keyboard-key path
-// (shows "kp2"); 4-7 (d-pad) draw as glyphs. Two levers, both per glyph style:
-//   * RENDERER: NOP the `cmp al,4 / jb <keyname>` at 0x4ced6f & 0x4cff38 -> face buttons draw as
-//     glyphs. Applied COLD in DllMain so the prompts are correct from the first frame.
+// A token resolves to a glyph SLOT in the buttons font, and the renderer gates which slots may
+// draw as art. Both call sites (measure 0x4ced6d, draw 0x4cff36) carry the same chain:
+//
+//     cmp al,4  / jb  keyname      <- slots 0-3   (face buttons)   -> keyboard key NAME
+//     cmp al,0dh/ ja  keyname      <- slots 14+   (START/BACK, shoulders, combos, sticks)
+//     cmp al,7  / jbe glyph        <- slots 4-7   (d-pad)          -> real glyph
+//     cmp al,0ah/ jae glyph        <- slots 10-13 (diagonals)      -> real glyph
+//                                     slots 8-9   fall through     -> keyboard key NAME
+//
+// So on PC only 4-7 and 10-13 ever drew as art; everything else printed the bound keyboard key.
+// The art is there for ALL of them: ButtonsXbox holds 22 glyphs (Ps2 20, Ngc 19), including
+// START/BACK at 8/9 and a WIDE combined "LB + RB" glyph at 18 — which is exactly what a prompt
+// like "Get out of half pipe level out (\ml)" asks for (\ml -> logical 21 -> xbox slot 18), and
+// which used to print "(KP7+KP9)". Two levers, both per glyph style:
+//   * RENDERER: NOP the `jb` and raise BOTH `cmp` immediates to the style's highest real glyph
+//     slot, so every slot the font actually has draws as art and only genuinely out-of-range
+//     tokens still fall to the key-name path. Applied COLD in DllMain so the prompts are correct
+//     from the first frame.
 //   * FONT: the buttons-font name immediate (ButtonsXbox) lives at 0x48d983; repoint it to
 //     "ButtonsPs2"/"ButtonsNgc" (ship in fonts.prx) to theme the glyphs. Must be set before the
 //     font loads at startup -> done in DllMain. (Can't change live; applies on next launch.)
@@ -38,13 +52,27 @@ static char NAME_NGC[] = "ButtonsNgc";
 
 static const uint32_t FONT_IMM = 0x0048d983;   // imm32 of `mov [esp+0xc],0x648afc` (ButtonsXbox)
 static const uint32_t BR1 = 0x004ced6f, BR2 = 0x004cff38;   // cmp al,4 / jb <keyname>  (72 0c)
+// The imm8 of the two range compares that follow each `jb`, at the measure and the draw site.
+// HI = `cmp al,0dh` (ja keyname), LO = `cmp al,7` (jbe glyph). Raising both to the same ceiling
+// makes the whole span 0..ceiling take the glyph path; `cmp al,0ah / jae` below them goes dead.
+static const uint32_t HI1 = 0x004ced72, LO1 = 0x004ced76;   // measure site
+static const uint32_t HI2 = 0x004cff3b, LO2 = 0x004cff3f;   // draw site
+static const uint8_t STOCK_HI = 0x0d, STOCK_LO = 0x07;
+
+// Highest real glyph slot per buttons font (numChars-1, read out of the .fnt.xbx headers in
+// fonts.prx: Xbox 22 glyphs, Ps2 20, Ngc 19). Never raise a ceiling past its own font — a slot
+// the font does not have would index off the end of its rect table.
+static uint8_t glyph_ceiling(int st) {
+    return st == ST_PS ? 0x13 : st == ST_GC ? 0x12 : 0x15;
+}
 static const uint32_t FLAG_ROOT = 0x007ce478;  // *(*0x7ce478 + 0x20) = flagmgr; bitfield at +0x5f0
 // GlobalFlag indices — MUST match mods/.../global_flags (MOD_GLYPH_SET/B0/B1).
 static const int F_SET = 387, F_B0 = 388, F_B1 = 389;
 
 static int  g_env_style  = ST_XBOX;   // launcher default (VV_GLYPHS); used when menu = Default
 static int  g_boot_style = ST_XBOX;   // resolved at boot (cfg > env)
-static int  g_renderer   = -1;        // applied renderer: -1 unknown, 0 keyboard, 1 controller
+static int  g_font_style = ST_XBOX;   // whose buttons font is actually LOADED (fixed for this run)
+static int  g_renderer   = -1;        // applied renderer: -1 unknown, else the style it was set to
 static bool g_live       = true;      // VV_GLYPH_LIVE: re-patch code live on a menu change (off on macOS)
 
 // ---- patch helpers ----------------------------------------------------------
@@ -76,17 +104,41 @@ static bool patch_mem(uint32_t va, const void* bytes, size_t n) {
 static void patch_dword(uint32_t va, uint32_t val) {
     patch_mem(va, &val, 4);
 }
+
+// Every address here is hardcoded for the no-CD THUG2.exe (md5 d464781a...). We now rewrite six
+// bytes of the renderer instead of two, so check first that the untouched exe really is the one
+// we reversed: read the whole compare chain at both sites and refuse to patch anything if either
+// differs. A wrong build then just keeps stock keyboard prompts instead of taking a scattergun of
+// writes through unrelated instructions.
+static bool g_patch_ok = false;
+static bool sig_ok() {
+    // cmp al,4 / jb keyname / cmp al,0dh / ja keyname / cmp al,7 / jbe glyph — the trailing
+    // jbe displacement is the one byte that differs between the measure and the draw site.
+    const uint8_t measure[] = { 0x3c,0x04, 0x72,0x0c, 0x3c,0x0d, 0x77,0x08, 0x3c,0x07, 0x76,0x5c };
+    const uint8_t draw[]    = { 0x3c,0x04, 0x72,0x0c, 0x3c,0x0d, 0x77,0x08, 0x3c,0x07, 0x76,0x64 };
+    return memcmp((const void*)(uintptr_t)(BR1 - 2), measure, sizeof measure) == 0
+        && memcmp((const void*)(uintptr_t)(BR2 - 2), draw,    sizeof draw)    == 0;
+}
 static void set_branch(uint32_t va, bool nop) {     // nop=glyphs, restore=keyboard
     const uint8_t glyphs[2]   = { 0x90, 0x90 };     // nop nop
     const uint8_t keyboard[2] = { 0x72, 0x0c };     // jb <keyname>
     patch_mem(va, nop ? glyphs : keyboard, 2);
 }
-static void apply_renderer(bool controller) {
-    if (g_renderer == (int)controller) return;
+// Set the renderer for a style. Keyboard restores every stock byte, so pulling the .asi (or
+// picking Keyboard) leaves the exe exactly as shipped. The ceiling is per style because each
+// buttons font has a different glyph count.
+static void apply_renderer(int st) {
+    if (!g_patch_ok || g_renderer == st) return;
+    const bool controller = st != ST_KEYBOARD;
+    const uint8_t hi = controller ? glyph_ceiling(st) : STOCK_HI;
+    const uint8_t lo = controller ? glyph_ceiling(st) : STOCK_LO;
     set_branch(BR1, controller); set_branch(BR2, controller);
-    g_renderer = controller;
+    patch_mem(HI1, &hi, 1); patch_mem(LO1, &lo, 1);
+    patch_mem(HI2, &hi, 1); patch_mem(LO2, &lo, 1);
+    g_renderer = st;
 }
 static void apply_font(int st) {                    // DllMain only (before the font loads)
+    if (!g_patch_ok) return;                        // not the exe we reversed — leave it alone
     if (st == ST_PS) patch_dword(FONT_IMM, (uint32_t)(uintptr_t)NAME_PS2);
     else if (st == ST_GC) patch_dword(FONT_IMM, (uint32_t)(uintptr_t)NAME_NGC);
     // xbox / keyboard -> leave ButtonsXbox
@@ -154,14 +206,14 @@ static bool get_flag(int idx, bool* val) {
 static DWORD WINAPI worker(LPVOID) {
     if (g_live) {
         Sleep(6000);                                   // combo text renders in menus — let the game settle
-        apply_renderer(g_boot_style != ST_KEYBOARD);   // initial state from the boot style
+        apply_renderer(g_boot_style);                  // initial state from the boot style
     }
     int last = -2;
     for (;;) {
         Sleep(1000);
         bool set = false;
         if (!get_flag(F_SET, &set)) {                  // flags not ready yet
-            if (g_live) apply_renderer(g_boot_style != ST_KEYBOARD);
+            if (g_live) apply_renderer(g_boot_style);
             continue;
         }
         int desired;
@@ -172,7 +224,10 @@ static DWORD WINAPI worker(LPVOID) {
             desired = (b0 ? 1 : 0) + (b1 ? 2 : 0); // 0=kb 1=xbox 2=ps 3=gc
         }
         if (desired == last) continue;
-        if (g_live) apply_renderer(desired != ST_KEYBOARD);   // keyboard<->controller live (native only)
+        // Live means keyboard<->controller only. The ceiling has to match the font that is
+        // LOADED, not the one just picked: asking for the Xbox ceiling while ButtonsPs2 is in
+        // memory would let a token index past the end of that font's 20 glyphs.
+        if (g_live) apply_renderer(desired == ST_KEYBOARD ? ST_KEYBOARD : g_font_style);
         if (set) write_cfg(desired); else delete_cfg();       // theme (and cold kb toggle) apply next launch
         last = desired;
     }
@@ -189,10 +244,13 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD r, LPVOID) {
     const char* live = getenv("VV_GLYPH_LIVE");
     g_live = !(live && live[0] == '0' && live[1] == '\0');   // VV_GLYPH_LIVE=0 -> cold only (macOS)
 
+    g_patch_ok = sig_ok();                               // read the stock bytes before touching any
+
     int cfg;
     g_boot_style = read_cfg(&cfg) ? cfg : g_env_style;   // in-game choice wins over launcher default
     apply_font(g_boot_style);                            // must happen before startup loads the font
-    if (!g_live) apply_renderer(g_boot_style != ST_KEYBOARD);   // COLD — no game thread exists yet
+    g_font_style = g_boot_style == ST_KEYBOARD ? ST_XBOX : g_boot_style;   // keyboard leaves ButtonsXbox
+    if (!g_live) apply_renderer(g_boot_style);           // COLD — no game thread exists yet
 
     CreateThread(0, 0, worker, 0, 0, 0);                 // menu watcher (+ live renderer when g_live)
     return TRUE;

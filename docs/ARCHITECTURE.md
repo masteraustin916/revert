@@ -37,6 +37,13 @@ the Ultimate ASI Loader (our `winmm.dll`) alongside the stock WidescreenFix:
   from `$VV_GLYPHS` (launcher) or the in-game **MOD OPTIONS → Button Glyphs** menu (read live from the
   GlobalFlag bitfield); keyboard↔controller is live, console art applies on the next launch.
   These hardcode addresses for the no-CD `THUG2.exe` (md5 `d464781a…`); re-derive if it changes.
+  `VV.GlyphFix.asi` checks the stock bytes at both patch sites first and no-ops entirely on a
+  mismatch, so a different build keeps stock prompts rather than taking stray writes.
+- **`tools/glyphfix/retag_trigger_glyphs.py`** — a build post-pass (`revert`
+  `install_trigger_glyphs`), not an `.asi`. `ButtonsXbox.fnt.xbx` is original-Xbox art, whose
+  analog triggers are lettered plain `L`/`R`; on a 360-era pad that reads as the bumpers. This
+  repaints those glyphs to `LT` / `RT` / `LT+RT` inside `Data/pre/fonts.prx`. Pixels only, so
+  glyph metrics are unchanged, and it is idempotent.
 - **`share/setup/revert-setup.sh` (bash)** — GE-Proton + DXVK + winetricks + `winmm`
   override + controller across the main (+ optional online) prefix.
 
